@@ -1,0 +1,93 @@
+#!/usr/bin/python
+
+import argparse
+import silk
+import os
+import subprocess
+import sys
+
+# Tailor to local repository location
+index_prefix="/netflow/index/"
+data_prefix="/netflow/data/"
+
+parser=argparse.ArgumentParser(description="pre-rwfilter filter",usage=subprocess.check_output(['rwfilter','--help']))
+parser.add_argument("--start-date",action="store",dest="start")
+parser.add_argument("--end-date",action="store",dest="end")
+parser.add_argument("--saddress",action="store")
+parser.add_argument("--daddress",action="store")
+parser.add_argument("--sensors")
+parser.add_argument("--class",action="store",dest="classname")
+parser.add_argument("--type",action="store")
+parser.add_argument("--verbose",action="store_true")
+
+# NOTE: Only uses saddress/daddress.   Other IP type partitioning switches could also be handled
+# Such as any-address, scidr, dcidr, any-cidr, sip-set, dip-set.  TODO
+# Probably no benefit to handing the "not" equivalents
+
+(args,extra)=parser.parse_known_args()
+
+
+# Fix up arguments to work with repository_iter
+if not args.classname:
+	args.classname="all"
+if args.type:
+	args.types=args.type.split(",")
+else:
+   	args.types=None
+
+site=silk.site.init_site(siteconf="/etc/silk/silk.conf", rootdir=data_prefix)
+
+filenames=silk.site.repository_iter(sensors=args.sensors,start=args.start,end=args.end,classname=args.classname,types=args.types)
+
+filelist=[]
+
+for file in filenames:
+	#Replace the prefix
+	index_file=index_prefix+file[len(data_prefix):]
+
+	if args.saddress:
+   	  sipset_name=index_file+".sip.set"
+	  saddress=silk.IPWildcard(args.saddress)
+	  try:
+		sipset=silk.IPSet.load(sipset_name)
+		if sipset.intersection(saddress):
+			if args.verbose:
+                		sys.stderr.write(file+"\n")
+			filelist.append(file)
+	  except IOError:
+		# Index doesn't exist, add to the list anyway
+		filelist.append(file)
+		pass
+
+	if args.daddress:
+	  dipset_name=index_file+".dip.set"
+	  daddress=silk.IPWildcard(args.daddress)
+	  try:
+                dipset=silk.IPSet.load(dipset_name)
+                if dipset.intersection(daddress):
+			if args.verbose:
+                        	sys.stderr.write(file+"\n")
+                        filelist.append(file)
+          except IOError:
+                # Index doesn't exist, add to the list anyway
+                filelist.append(file)
+                pass
+
+	# Neither saddress or daddress passes, so return everything
+	if not args.daddress and not args.saddress:
+		filelist.append(file)
+
+# Add back the saddress/daddress fields so rwfilter sees them
+if args.saddress:
+	extra.extend(["--saddress",args.saddress])
+if args.daddress:
+	extra.extend(["--daddress",args.daddress])
+
+#Extra contains non selection switches. Append --xargs as we rely on this giving us the files to parse
+extra.append("--xargs")
+
+rwfilter=subprocess.Popen(["rwfilter"]+extra,stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+stdout=rwfilter.communicate("\n".join(filelist))[0]
+os.write(sys.stdout.fileno(),stdout)
+
+
